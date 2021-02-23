@@ -6,6 +6,7 @@
 - easy to use buffer management for sending and receiving data
   - achieves up to 1MB/s (USB FS) when transmitting to Linux host (MB = 10^6Byte) (tested on STM32F4 with fcpu > 100MHz)
   - functions to check if packets were dropped both for transmission and reception
+- Attempts to avoid zero length packets (small latency vs speed tradeoff)
 
 ### How to use
 - replace `USB_DEVICE/App/usbd_cdc_if.c` and `USB_DEVICE/App/usbd_cdc_if.h` with the ones provided in the repository
