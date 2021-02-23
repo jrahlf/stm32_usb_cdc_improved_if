@@ -10,6 +10,8 @@
 ### How to use
 - replace `USB_DEVICE/App/usbd_cdc_if.c` and `USB_DEVICE/App/usbd_cdc_if.h` with the ones provided in the repository
   - adjust  `APP_RX_DATA_SIZE` and `APP_TX_DATA_SIZE` if needed
+- Send data via `CDC_Transmit_FS(const uint8_t* Buf, uint16_t Len)` or `CDC_TransmitString_FS(const char *string)`
+- Receive data via `CDC_RXQueue_Dequeue(uint8_t* Dst, uint32_t MaxLen)` or by overriding `CDC_DataReceivedHandler(const uint8_t *Data, uint32_t len)`
 
 ### TODO
 - transmitting data from interrupt currently not allowed
