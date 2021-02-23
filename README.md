@@ -15,3 +15,4 @@
 - transmitting data from interrupt currently not allowed
 - check if the physical limit of 4096 bytes for the USB packet area really applies to all devices
 - generalize for USB HS
+- volatile variables not optimal
