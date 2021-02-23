@@ -50,7 +50,6 @@
   */
 
 /* USER CODE BEGIN PRIVATE_TYPES */
-
 /* USER CODE END PRIVATE_TYPES */
 
 /**
@@ -95,6 +94,14 @@ uint8_t UserRxBufferFS[APP_RX_DATA_SIZE];
 uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
+
+static volatile uint32_t s_txhead = 0;
+static volatile uint32_t s_txtail = 0;
+static volatile uint32_t s_rxhead = 0;
+static volatile uint32_t s_rxtail = 0;
+static volatile uint32_t s_txDropCounter = 0;
+static volatile uint32_t s_rxDropCounter = 0;
+
 static USBD_CDC_LineCodingTypeDef s_linecoding = {
   115200, /* baud rate*/
   0x00,   /* stop bits-1*/
@@ -134,7 +141,9 @@ static int8_t CDC_Receive_FS(uint8_t* pbuf, uint32_t *Len);
 static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
-
+static uint8_t CDC_RXQueue_Enqueue(const uint8_t *buffer, uint32_t length);
+static uint8_t CDC_TXQueue_Enqueue(const uint8_t *buffer, uint32_t length);
+static const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length);
 /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
 
 /**
@@ -276,6 +285,14 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
+  uint8_t dataHandled = CDC_DataReceivedHandler(Buf, *Len);
+
+  if (dataHandled == CDC_RX_DATA_NOTHANDLED) {
+	  if (CDC_RXQueue_Enqueue(Buf, *Len) != USBD_OK) {
+		  s_rxDropCounter++;
+	  }
+  }
+
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
   return (USBD_OK);
@@ -286,23 +303,42 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
   * @brief  CDC_Transmit_FS
   *         Data to send over USB IN endpoint are sent over CDC interface
   *         through this function.
-  *         @note
+  *         @note must not be called from interrupt context which can interrupt USB interrupt
   *
   *
   * @param  Buf: Buffer of data to be sent
   * @param  Len: Number of data to be sent (in bytes)
   * @retval USBD_OK if all operations are OK else USBD_FAIL or USBD_BUSY
   */
-uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
+uint8_t CDC_Transmit_FS(const uint8_t* Buf, uint16_t Len)
 {
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 7 */
-  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
-  if (hcdc->TxState != 0){
-    return USBD_BUSY;
+
+  if (Len > 4096 + APP_TX_DATA_SIZE) {
+	  return USBD_FAIL;
   }
-  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
-  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+
+  if (CDC_IsBusy()) {
+	  result =  CDC_TXQueue_Enqueue(Buf, Len);
+	  if (result != USBD_OK) {
+		  s_txDropCounter++;
+	  }
+	  return result;
+  }
+
+  // due to automatic de-queueing from interrupt, at this point the transmit queue has to be empty
+  // physical limit is 4096, use 4095 to avoid ZLP packet
+
+  if (Len <= 4095) {
+	  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)Buf, Len);
+	  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+  } else {
+	  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)Buf, 4095);
+	  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+	  CDC_TXQueue_Enqueue((uint8_t*)Buf + 4095, Len - 4095);
+  }
+
   /* USER CODE END 7 */
   return result;
 }
@@ -326,11 +362,296 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
   UNUSED(Buf);
   UNUSED(Len);
   UNUSED(epnum);
+
+  uint32_t queueLength;
+  const uint8_t * queueData = CDC_TXQueue_Dequeue(&queueLength);
+  if (queueLength > 0) {
+	  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)queueData, queueLength);
+	  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+  }
+
   /* USER CODE END 13 */
   return result;
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+
+/**
+  * @brief  CDC_TXQueue_GetReadAvailable
+  *         Check how many bytes are waiting for sending in the transmission queue
+  *
+  *         @note this is usually not of concern for the user
+  *
+  *
+  * @retval number of enqueued bytes in the transmission queue
+  */
+uint32_t CDC_TXQueue_GetReadAvailable()
+{
+	return s_txhead - s_txtail;
+}
+
+/**
+  * @brief  CDC_TXQueue_GetWriteAvailable
+  *         Check how much space is left in the transmission queue
+  *
+  *
+  * @retval number of available bytes in the transmission queue
+  */
+uint32_t CDC_TXQueue_GetWriteAvailable()
+{
+	return APP_TX_DATA_SIZE - CDC_TXQueue_GetReadAvailable();
+}
+
+/**
+  * @brief  CDC_RXQueue_GetReadAvailable
+  *         Check how many bytes are enqueued in the reception queue
+  *
+  *
+  * @retval number of available bytes in the reception queue
+  */
+uint32_t CDC_RXQueue_GetReadAvailable()
+{
+	return s_rxhead - s_rxtail;
+}
+
+/**
+  * @brief  CDC_RXQueue_GetWriteAvailable
+  *         Check how much space is left in the reception queue
+  *
+  *         @note this is usually not of concern for the user
+  *
+  *
+  * @retval number of available bytes in the reception queue
+  */
+uint32_t CDC_RXQueue_GetWriteAvailable()
+{
+	return APP_RX_DATA_SIZE - CDC_RXQueue_GetReadAvailable();
+}
+
+/**
+  * @brief  CDC_TXQueue_Enqueue
+  *         Enqueue data into the transmission queue
+  *
+  * @param  buffer: data to enqueue (must not be null)
+  * @param  length: length of data
+  * @retval USBD_OK if ok USBD_BUSY otherwise (queue full)
+  */
+uint8_t CDC_TXQueue_Enqueue(const uint8_t *buffer, uint32_t length)
+{
+	if (length > CDC_TXQueue_GetWriteAvailable()) {
+		return USBD_BUSY;
+	}
+
+	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (s_txhead % APP_TX_DATA_SIZE);
+	uint32_t firstLength = MIN(length, sizeTillWrapAround);
+	uint32_t secondLength = length - firstLength;
+
+	// first part
+	uint32_t insertIndex = s_txhead % APP_TX_DATA_SIZE;
+	memcpy(UserTxBufferFS + insertIndex, buffer, firstLength);
+	s_txhead += firstLength;
+
+	// second part after wrap around
+	memcpy(UserTxBufferFS, buffer + firstLength, secondLength);
+	s_txhead += secondLength;
+
+	return USBD_OK;
+}
+
+/**
+  * @brief  CDC_RXQueue_Enqueue
+  *         Enqueue data into the reception queue
+  *
+  * @param  buffer: data to enqueue (must not be null)
+  * @param  length: length of data
+  * @retval USBD_OK if ok USBD_BUSY otherwise (queue full)
+  */
+uint8_t CDC_RXQueue_Enqueue(const uint8_t *buffer, uint32_t length)
+{
+	if (length > CDC_RXQueue_GetWriteAvailable()) {
+		return USBD_BUSY;
+	}
+
+	uint32_t sizeTillWrapAround = APP_RX_DATA_SIZE - (s_rxhead % APP_RX_DATA_SIZE);
+	uint32_t firstLength = MIN(length, sizeTillWrapAround);
+	uint32_t secondLength = length - firstLength;
+
+	// first part
+	uint32_t insertIndex = s_rxhead % APP_RX_DATA_SIZE;
+	memcpy(UserRxBufferFS + insertIndex, buffer, firstLength);
+	s_rxhead += firstLength;
+
+	// second part after wrap around
+	memcpy(UserRxBufferFS, buffer + firstLength, secondLength);
+	s_rxhead += secondLength;
+
+	return USBD_OK;
+}
+
+/**
+  * @brief  CDC_TXQueue_Dequeue
+  *         Dequeue data from the transmission queue
+  *
+  *         @note
+  *         This is intended to be called from the transmission complete interrupt
+  *         The caller must not be interrupted by interrupts which use CDC_transmit functions
+  *         as the dequeued data is just a pointer to memory which can now be overriden again
+  *
+  * @param  length: pointer where the length of dequeued data is written to (must not be null)
+  * @retval buffer to dequeud data
+  */
+const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length)
+{
+	uint32_t queueSize = CDC_TXQueue_GetReadAvailable();
+	if (queueSize == 0) {
+		*length = 0;
+		return NULL;
+	}
+
+	// length is capped so that we get no buffer wrap around
+	// this reduces complexity and reduces memory requirements, but decreases throughput
+	// length is also capped to 4096 due to ST internals
+	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (s_txtail % APP_TX_DATA_SIZE);
+	uint32_t dequeueLength = MIN(MIN(queueSize, sizeTillWrapAround), 4096);
+
+	// this is a small optimization: if we send a packet multiple of 64 bytes (512 bytes for HS)
+	// the next USB transfer slot is wasted with a ZLP, so instead send 1 byte in next slot
+	// or possibly even more, if new data got enqueued
+	// this is increases throughput at the cost of latency
+	if (dequeueLength % 64 == 0) {
+		dequeueLength--;
+	}
+
+	*length = dequeueLength;
+	const uint8_t * dequeueData = UserTxBufferFS + (s_txtail % APP_TX_DATA_SIZE);
+	s_txtail += dequeueLength;
+
+	return dequeueData;
+}
+
+/**
+  * @brief  CDC_RXQueue_Dequeue
+  *         Dequeue all data from the reception queue, but at most MaxLen bytes
+  *
+  *
+  * @param  Dst: Destination buffer
+  * @param  MaxLen: Maximum number of bytes to read
+  * @retval Number of bytes dequeued. The value is 0 if no bytes are available
+  */
+uint32_t CDC_RXQueue_Dequeue(uint8_t* Dst, uint32_t MaxLen)
+{
+	uint32_t queueSize = CDC_RXQueue_GetReadAvailable();
+	if (queueSize == 0 || MaxLen == 0 || Dst == NULL) {
+		return 0;
+	}
+
+	uint32_t dequeueLength = MIN(queueSize, MaxLen);
+	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (s_rxtail % APP_RX_DATA_SIZE);
+	uint32_t firstLength = MIN(dequeueLength, sizeTillWrapAround);
+	uint32_t secondLength = dequeueLength - firstLength;
+
+	// first part
+	const uint8_t * dequeueData = UserRxBufferFS + (s_rxtail % APP_RX_DATA_SIZE);
+	memcpy(Dst, dequeueData, firstLength);
+	s_rxtail += firstLength;
+
+	// second part after wrap around
+	dequeueData = UserRxBufferFS;
+	memcpy(Dst + firstLength, dequeueData, secondLength);
+	s_rxtail += secondLength;
+
+	return dequeueLength;
+}
+
+/**
+  * @brief  CDC_IsBusy
+  *         Check if the CDC is busy transmitting data
+  *         @note If CDC is busy, one can still enqueue data
+  *
+  * @retval 1 if busy transmitting data
+  */
+uint8_t CDC_IsBusy()
+{
+	USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
+	return hcdc->TxState != 0;
+}
+
+/**
+  * @brief  CDC_GetDroppedTxPackets
+  *         Get the number of dropped packets which could not be sent (and also not enqueued)
+  *
+  * @retval number of dropped packets
+  */
+uint32_t CDC_GetDroppedTxPackets()
+{
+	return s_txDropCounter;
+}
+
+/**
+  * @brief  CDC_GetDroppedRxPackets
+  *         Get the number of dropped received packets (neither handled nor enqueued)
+  *
+  * @retval number of dropped packets
+  */
+uint32_t CDC_GetDroppedRxPackets()
+{
+	return s_rxDropCounter;
+}
+
+/**
+  * @brief  CDC_ResetDroppedTxPackets
+  *         Reset the dropped packed counter for the transmission
+  *
+  * @retval
+  */
+void CDC_ResetDroppedTxPackets()
+{
+	s_txDropCounter = 0;
+}
+
+/**
+  * @brief  CDC_ResetDroppedRxPackets
+  *         Reset the dropped packed counter for the reception
+  *
+  * @retval
+  */
+void CDC_ResetDroppedRxPackets()
+{
+	s_rxDropCounter = 0;
+}
+
+/**
+  * @brief  CDC_TransmitString_FS
+  *         Data to send over USB IN endpoint are sent over CDC interface
+  *         through this function.
+  *
+  *
+  * @param  string: 0-terminated C-string to send
+  * @retval USBD_OK if all operations are OK else USBD_FAIL or USBD_BUSY
+  */
+uint8_t CDC_TransmitString_FS(const char * string)
+{
+	return CDC_Transmit_FS((const uint8_t*)string, strlen(string));
+}
+
+/**
+  * @brief  CDC_DataReceivedHandler
+  *         Called when data is received via USB CDC
+  *         This can be overwritten via user provided function
+  *         @note this is called from USB interrupt context
+  *
+  *
+  * @param  Buf: data
+  * @param  len: number of bytes received (<= 64 for USB FS, <= 512 for USB HS)
+  * @retval CDC_RX_DATA_HANDLED if the data is handled and should not be placed in the receive queue
+  */
+__weak uint8_t CDC_DataReceivedHandler(const uint8_t *Buf, uint32_t len)
+{
+	UNUSED(Buf);
+	UNUSED(len);
+	return CDC_RX_DATA_NOTHANDLED;
+}
+
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 

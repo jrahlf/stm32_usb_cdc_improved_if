@@ -53,6 +53,8 @@
 /* It's up to user to redefine and/or remove those define */
 #define APP_RX_DATA_SIZE  2048
 #define APP_TX_DATA_SIZE  2048
+#define CDC_RX_DATA_HANDLED 1
+#define CDC_RX_DATA_NOTHANDLED 0
 
 /* USER CODE END EXPORTED_DEFINES */
 
@@ -79,7 +81,9 @@
   */
 
 /* USER CODE BEGIN EXPORTED_MACRO */
-
+ // warning: adapt this to CDC_DATA_HS_MAX_PACKET_SIZE if using HS USB
+_Static_assert(APP_RX_DATA_SIZE >= CDC_DATA_FS_MAX_PACKET_SIZE, "rx buffer must hold at least 1 full usb packet");
+_Static_assert(APP_TX_DATA_SIZE >= CDC_DATA_FS_MAX_PACKET_SIZE, "tx buffer should hold at least 1 full usb packet");
 /* USER CODE END EXPORTED_MACRO */
 
 /**
@@ -107,10 +111,21 @@ extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
   * @{
   */
 
-uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+uint8_t CDC_Transmit_FS(const uint8_t* Buf, uint16_t Len);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
-
+uint8_t CDC_TransmitString_FS(const char *string);
+uint8_t CDC_IsBusy();
+uint32_t CDC_RXQueue_Dequeue(uint8_t* Dst, uint32_t MaxLen);
+uint32_t CDC_TXQueue_GetReadAvailable();
+uint32_t CDC_TXQueue_GetWriteAvailable();
+uint32_t CDC_RXQueue_GetReadAvailable();
+uint32_t CDC_RXQueue_GetWriteAvailable();
+uint32_t CDC_GetDroppedTxPackets();
+uint32_t CDC_GetDroppedRxPackets();
+void CDC_ResetDroppedTxPackets();
+void CDC_ResetDroppedRxPackets();
+uint8_t CDC_DataReceivedHandler(const uint8_t *Data, uint32_t len);
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**
