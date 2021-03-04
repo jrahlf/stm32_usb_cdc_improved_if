@@ -29,7 +29,7 @@
 
 ### API
 ```c
-uint8_t CDC_Transmit_FS(const uint8_t* Buf, uint16_t Len);   // <--- same as from ST, except for constness
+uint8_t CDC_Transmit_FS(const uint8_t* Buf, uint16_t Len);   // <--- same as from ST, + constness
 uint8_t CDC_TransmitString_FS(const char *string);
 uint8_t CDC_IsBusy();
 uint32_t CDC_RXQueue_Dequeue(uint8_t* Dst, uint32_t MaxLen);
