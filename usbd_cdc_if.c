@@ -21,6 +21,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "usbd_cdc_if.h"
+#include <stdatomic.h>
 
 /* USER CODE BEGIN INCLUDE */
 
@@ -62,6 +63,10 @@
   */
 
 /* USER CODE BEGIN PRIVATE_DEFINES */
+#if APP_RX_DATA_SIZE == 0
+#undef APP_RX_DATA_SIZE
+#define APP_RX_DATA_SIZE 2
+#endif
 /* USER CODE END PRIVATE_DEFINES */
 
 /**
@@ -95,12 +100,17 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
 
-static volatile uint32_t s_txhead = 0;
-static volatile uint32_t s_txtail = 0;
-static volatile uint32_t s_rxhead = 0;
-static volatile uint32_t s_rxtail = 0;
-static volatile uint32_t s_txDropCounter = 0;
-static volatile uint32_t s_rxDropCounter = 0;
+static uint32_t s_txhead = 0;
+static uint32_t s_txtail = 0;
+static uint32_t s_rxhead = 0;
+static uint32_t s_rxtail = 0;
+
+static uint32_t s_lastTransmitStart = 0;
+static uint32_t s_lastTransmitComplete = 0;
+static uint32_t s_rxDropCounterHead = 0;
+static uint32_t s_rxDropCounterTail = 0;
+static uint32_t s_txDropCounter = 0;
+static uint8_t ReceiveBuffer[64];	// TODO 512 for HS
 
 static USBD_CDC_LineCodingTypeDef s_linecoding = {
   115200, /* baud rate*/
@@ -144,6 +154,7 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
 static uint8_t CDC_RXQueue_Enqueue(const uint8_t *buffer, uint32_t length);
 static uint8_t CDC_TXQueue_Enqueue(const uint8_t *buffer, uint32_t length);
 static const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length);
+static void CDC_ResumeTransmit(void);
 /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
 
 /**
@@ -169,7 +180,7 @@ static int8_t CDC_Init_FS(void)
   /* USER CODE BEGIN 3 */
   /* Set Application Buffers */
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
+  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, ReceiveBuffer);
   return (USBD_OK);
   /* USER CODE END 3 */
 }
@@ -289,11 +300,13 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 
   if (dataHandled == CDC_RX_DATA_NOTHANDLED) {
 	  if (CDC_RXQueue_Enqueue(Buf, *Len) != USBD_OK) {
-		  s_rxDropCounter++;
+		  atomic_signal_fence(memory_order_acquire);
+		  s_rxDropCounterHead++;
+		  atomic_signal_fence(memory_order_release);
 	  }
   }
 
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
+  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, ReceiveBuffer);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
   return (USBD_OK);
   /* USER CODE END 6 */
@@ -315,29 +328,12 @@ uint8_t CDC_Transmit_FS(const uint8_t* Buf, uint16_t Len)
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 7 */
 
-  if (Len > 4096 + APP_TX_DATA_SIZE) {
-	  return USBD_FAIL;
+  s_lastTransmitStart = HAL_GetTick();
+  result = CDC_TXQueue_Enqueue(Buf, Len);
+  if (result != USBD_OK) {
+	  s_txDropCounter++;
   }
-
-  if (CDC_IsBusy()) {
-	  result =  CDC_TXQueue_Enqueue(Buf, Len);
-	  if (result != USBD_OK) {
-		  s_txDropCounter++;
-	  }
-	  return result;
-  }
-
-  // due to automatic de-queueing from interrupt, at this point the transmit queue has to be empty
-  // physical limit is 4096, use 4095 to avoid ZLP packet
-
-  if (Len <= 4095) {
-	  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)Buf, Len);
-	  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
-  } else {
-	  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)Buf, 4095);
-	  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
-	  CDC_TXQueue_Enqueue((uint8_t*)Buf + 4095, Len - 4095);
-  }
+  CDC_ResumeTransmit();
 
   /* USER CODE END 7 */
   return result;
@@ -363,18 +359,37 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
   UNUSED(Len);
   UNUSED(epnum);
 
-  uint32_t queueLength;
-  const uint8_t * queueData = CDC_TXQueue_Dequeue(&queueLength);
-  if (queueLength > 0) {
-	  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)queueData, queueLength);
-	  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
-  }
+  atomic_signal_fence(memory_order_acquire);
+  s_txtail += *Len;
+  s_lastTransmitComplete = HAL_GetTick();
+  atomic_signal_fence(memory_order_release);
+
+  CDC_ResumeTransmit();
 
   /* USER CODE END 13 */
   return result;
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+
+/**
+  * @brief  CDC_ResumeTransmit
+  *         Resume transmission by dequeing data from transmission queue if possible and if usb is not busy
+  *
+  */
+void CDC_ResumeTransmit(void)
+{
+	if (CDC_IsBusy()) {
+		return;
+	}
+
+	uint32_t queueLength;
+	const uint8_t * queueData = CDC_TXQueue_Dequeue(&queueLength);
+	if (queueLength > 0) {
+		USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*)queueData, queueLength);
+		USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+	}
+}
 
 /**
   * @brief  CDC_TXQueue_GetReadAvailable
@@ -387,6 +402,7 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
   */
 uint32_t CDC_TXQueue_GetReadAvailable()
 {
+	atomic_signal_fence(memory_order_acquire);
 	return s_txhead - s_txtail;
 }
 
@@ -411,6 +427,7 @@ uint32_t CDC_TXQueue_GetWriteAvailable()
   */
 uint32_t CDC_RXQueue_GetReadAvailable()
 {
+	atomic_signal_fence(memory_order_acquire);
 	return s_rxhead - s_rxtail;
 }
 
@@ -442,18 +459,24 @@ uint8_t CDC_TXQueue_Enqueue(const uint8_t *buffer, uint32_t length)
 		return USBD_BUSY;
 	}
 
-	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (s_txhead % APP_TX_DATA_SIZE);
+	atomic_signal_fence(memory_order_acquire);
+	uint32_t head = s_txhead;
+	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (head % APP_TX_DATA_SIZE);
 	uint32_t firstLength = MIN(length, sizeTillWrapAround);
 	uint32_t secondLength = length - firstLength;
 
 	// first part
-	uint32_t insertIndex = s_txhead % APP_TX_DATA_SIZE;
+	uint32_t insertIndex = head % APP_TX_DATA_SIZE;
 	memcpy(UserTxBufferFS + insertIndex, buffer, firstLength);
-	s_txhead += firstLength;
+	head += firstLength;
 
 	// second part after wrap around
 	memcpy(UserTxBufferFS, buffer + firstLength, secondLength);
-	s_txhead += secondLength;
+	head += secondLength;
+
+	atomic_signal_fence(memory_order_acquire);
+	s_txhead = head;
+	atomic_signal_fence(memory_order_release);
 
 	return USBD_OK;
 }
@@ -472,18 +495,24 @@ uint8_t CDC_RXQueue_Enqueue(const uint8_t *buffer, uint32_t length)
 		return USBD_BUSY;
 	}
 
-	uint32_t sizeTillWrapAround = APP_RX_DATA_SIZE - (s_rxhead % APP_RX_DATA_SIZE);
+	atomic_signal_fence(memory_order_acquire);
+	uint32_t head = s_rxhead;
+	uint32_t sizeTillWrapAround = APP_RX_DATA_SIZE - (head % APP_RX_DATA_SIZE);
 	uint32_t firstLength = MIN(length, sizeTillWrapAround);
 	uint32_t secondLength = length - firstLength;
 
 	// first part
-	uint32_t insertIndex = s_rxhead % APP_RX_DATA_SIZE;
+	uint32_t insertIndex = head % APP_RX_DATA_SIZE;
 	memcpy(UserRxBufferFS + insertIndex, buffer, firstLength);
-	s_rxhead += firstLength;
+	head += firstLength;
 
 	// second part after wrap around
 	memcpy(UserRxBufferFS, buffer + firstLength, secondLength);
-	s_rxhead += secondLength;
+	head += secondLength;
+
+	atomic_signal_fence(memory_order_acquire);
+	s_rxhead = head;
+	atomic_signal_fence(memory_order_release);
 
 	return USBD_OK;
 }
@@ -496,6 +525,8 @@ uint8_t CDC_RXQueue_Enqueue(const uint8_t *buffer, uint32_t length)
   *         This is intended to be called from the transmission complete interrupt
   *         The caller must not be interrupted by interrupts which use CDC_transmit functions
   *         as the dequeued data is just a pointer to memory which can now be overriden again
+  *         Also the caller must increase s_txtail after the transmission is complete, usually in the next
+  *         transmission complete interrupt
   *
   * @param  length: pointer where the length of dequeued data is written to (must not be null)
   * @retval buffer to dequeud data
@@ -508,23 +539,25 @@ const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length)
 		return NULL;
 	}
 
+	atomic_signal_fence(memory_order_acquire);
+
 	// length is capped so that we get no buffer wrap around
 	// this reduces complexity and reduces memory requirements, but decreases throughput
 	// length is also capped to 4096 due to ST internals
-	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (s_txtail % APP_TX_DATA_SIZE);
+	uint32_t tail = s_txtail;
+	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (tail % APP_TX_DATA_SIZE);
 	uint32_t dequeueLength = MIN(MIN(queueSize, sizeTillWrapAround), 4096);
 
 	// this is a small optimization: if we send a packet multiple of 64 bytes (512 bytes for HS)
 	// the next USB transfer slot is wasted with a ZLP, so instead send 1 byte in next slot
 	// or possibly even more, if new data got enqueued
-	// this is increases throughput at the cost of latency
+	// this increases throughput at the cost of latency
 	if (dequeueLength % 64 == 0) {
 		dequeueLength--;
 	}
 
 	*length = dequeueLength;
-	const uint8_t * dequeueData = UserTxBufferFS + (s_txtail % APP_TX_DATA_SIZE);
-	s_txtail += dequeueLength;
+	const uint8_t * dequeueData = UserTxBufferFS + (tail % APP_TX_DATA_SIZE);
 
 	return dequeueData;
 }
@@ -545,20 +578,26 @@ uint32_t CDC_RXQueue_Dequeue(uint8_t* Dst, uint32_t MaxLen)
 		return 0;
 	}
 
+	atomic_signal_fence(memory_order_acquire);
+	uint32_t tail = s_rxtail;
 	uint32_t dequeueLength = MIN(queueSize, MaxLen);
-	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (s_rxtail % APP_RX_DATA_SIZE);
+	uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (tail % APP_RX_DATA_SIZE);
 	uint32_t firstLength = MIN(dequeueLength, sizeTillWrapAround);
 	uint32_t secondLength = dequeueLength - firstLength;
 
 	// first part
-	const uint8_t * dequeueData = UserRxBufferFS + (s_rxtail % APP_RX_DATA_SIZE);
+	const uint8_t * dequeueData = UserRxBufferFS + (tail % APP_RX_DATA_SIZE);
 	memcpy(Dst, dequeueData, firstLength);
-	s_rxtail += firstLength;
+	tail += firstLength;
 
 	// second part after wrap around
 	dequeueData = UserRxBufferFS;
 	memcpy(Dst + firstLength, dequeueData, secondLength);
-	s_rxtail += secondLength;
+	tail += secondLength;
+
+	atomic_signal_fence(memory_order_acquire);
+	s_rxtail = tail;
+	atomic_signal_fence(memory_order_release);
 
 	return dequeueLength;
 }
@@ -578,7 +617,8 @@ uint8_t CDC_IsBusy()
 
 /**
   * @brief  CDC_GetDroppedTxPackets
-  *         Get the number of dropped packets which could not be sent (and also not enqueued)
+  *         Get the number of dropped packets which could not be sent (and also not enqueued),
+  *         because the TX buffer did not have enough space left
   *
   * @retval number of dropped packets
   */
@@ -595,7 +635,8 @@ uint32_t CDC_GetDroppedTxPackets()
   */
 uint32_t CDC_GetDroppedRxPackets()
 {
-	return s_rxDropCounter;
+	atomic_signal_fence(memory_order_acquire);
+	return s_rxDropCounterHead - s_rxDropCounterTail;
 }
 
 /**
@@ -617,7 +658,9 @@ void CDC_ResetDroppedTxPackets()
   */
 void CDC_ResetDroppedRxPackets()
 {
-	s_rxDropCounter = 0;
+	atomic_signal_fence(memory_order_acquire);
+	s_rxDropCounterTail = s_rxDropCounterTail;
+	atomic_signal_fence(memory_order_release);
 }
 
 /**
@@ -632,6 +675,51 @@ void CDC_ResetDroppedRxPackets()
 uint8_t CDC_TransmitString_FS(const char * string)
 {
 	return CDC_Transmit_FS((const uint8_t*)string, strlen(string));
+}
+
+/**
+  * @brief  CDC_GetLastTransmitStartTick
+  *         Get the timestamp of when the last packet's _attempted_ transmission
+  *         was started
+  *
+  *
+  * @retval timestamp in HAL ticks
+  */
+uint32_t CDC_GetLastTransmitStartTick()
+{
+	return s_lastTransmitStart;
+}
+
+/**
+  * @brief  CDC_GetLastTransmitCompleteTick
+  *         Get the timestamp of when the last packet was successfully sent to the
+  *         connected computer
+  *
+  * @retval timestamp in HAL ticks
+  */
+uint32_t CDC_GetLastTransmitCompleteTick()
+{
+	atomic_signal_fence(memory_order_acquire);
+	return s_lastTransmitComplete;
+}
+
+/**
+  * @brief  CDC_IsComportOpen
+  *         Check if the connectd computer is reading data through the virtual com port
+  *
+  *         @note This functions relies on the start and comlete timestamp on the last sent packet,
+  *         thus it is only reliable if at least 1 packet has been sent and also the information
+  *         is as recent as the last sent packet (or attempted to send packet)
+  *         This also means you cannot wait for CDC_IsComportOpen to return true and then start
+  *         sending data.
+  *
+  *
+  * @retval 1 if the com port is open on the computer side and the computer is reading data
+  */
+uint8_t CDC_IsComportOpen()
+{
+	atomic_signal_fence(memory_order_acquire);
+	return s_lastTransmitStart - s_lastTransmitComplete < 500;
 }
 
 /**

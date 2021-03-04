@@ -50,9 +50,10 @@
   */
 /* USER CODE BEGIN EXPORTED_DEFINES */
 /* Define size for the receive and transmit buffer over CDC */
-/* It's up to user to redefine and/or remove those define */
-#define APP_RX_DATA_SIZE  2048
-#define APP_TX_DATA_SIZE  2048
+/* Powers of 2 are a good choice so that modulo operations become faster mask operations */
+/* If you overwrite the RX handler and always process the data, APP_RX_DATA_SIZE should be set to 0 to save RAM */
+#define APP_RX_DATA_SIZE  512
+#define APP_TX_DATA_SIZE  8192
 #define CDC_RX_DATA_HANDLED 1
 #define CDC_RX_DATA_NOTHANDLED 0
 
@@ -82,7 +83,6 @@
 
 /* USER CODE BEGIN EXPORTED_MACRO */
  // warning: adapt this to CDC_DATA_HS_MAX_PACKET_SIZE if using HS USB
-_Static_assert(APP_RX_DATA_SIZE >= CDC_DATA_FS_MAX_PACKET_SIZE, "rx buffer must hold at least 1 full usb packet");
 _Static_assert(APP_TX_DATA_SIZE >= CDC_DATA_FS_MAX_PACKET_SIZE, "tx buffer should hold at least 1 full usb packet");
 /* USER CODE END EXPORTED_MACRO */
 
@@ -126,6 +126,9 @@ uint32_t CDC_GetDroppedRxPackets();
 void CDC_ResetDroppedTxPackets();
 void CDC_ResetDroppedRxPackets();
 uint8_t CDC_DataReceivedHandler(const uint8_t *Data, uint32_t len);
+uint32_t CDC_GetLastTransmitStartTick();
+uint32_t CDC_GetLastTransmitCompleteTick();
+uint8_t CDC_IsComportOpen();
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**
