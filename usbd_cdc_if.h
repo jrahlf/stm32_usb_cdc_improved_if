@@ -51,11 +51,17 @@
 /* USER CODE BEGIN EXPORTED_DEFINES */
 /* Define size for the receive and transmit buffer over CDC */
 /* Powers of 2 are a good choice so that modulo operations become faster mask operations */
-/* If you overwrite the RX handler and always process the data, APP_RX_DATA_SIZE should be set to 0 to save RAM */
+/* If you overwrite the CDC_DataReceivedHandler and always process the data, APP_RX_DATA_SIZE should be set to 0 to save RAM */
 #define APP_RX_DATA_SIZE  512
 #define APP_TX_DATA_SIZE  8192
 #define CDC_RX_DATA_HANDLED 1
 #define CDC_RX_DATA_NOTHANDLED 0
+
+#ifndef USE_USB_FS
+// if you are using USB_HS uncomment the following define
+// it is here because ST forgot to define it for USB FS
+#define USE_USB_FS 1
+#endif
 
 /* USER CODE END EXPORTED_DEFINES */
 
@@ -82,8 +88,11 @@
   */
 
 /* USER CODE BEGIN EXPORTED_MACRO */
- // warning: adapt this to CDC_DATA_HS_MAX_PACKET_SIZE if using HS USB
-_Static_assert(APP_TX_DATA_SIZE >= CDC_DATA_FS_MAX_PACKET_SIZE, "tx buffer should hold at least 1 full usb packet");
+#ifdef USE_USB_FS
+    _Static_assert(APP_TX_DATA_SIZE >= CDC_DATA_FS_MAX_PACKET_SIZE, "tx buffer should hold at least 1 full usb packet");
+#else
+    _Static_assert(APP_TX_DATA_SIZE >= CDC_DATA_HS_MAX_PACKET_SIZE, "tx buffer should hold at least 1 full usb packet");
+#endif
 /* USER CODE END EXPORTED_MACRO */
 
 /**
@@ -96,7 +105,12 @@ _Static_assert(APP_TX_DATA_SIZE >= CDC_DATA_FS_MAX_PACKET_SIZE, "tx buffer shoul
   */
 
 /** CDC Interface callback. */
-extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
+#ifdef USE_USB_FS
+    extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
+#else
+    extern USBD_CDC_ItfTypeDef USBD_Interface_fops_HS;
+#endif
+
 
 /* USER CODE BEGIN EXPORTED_VARIABLES */
 
@@ -111,12 +125,11 @@ extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
   * @{
   */
 
-uint8_t CDC_Transmit_FS(const uint8_t* Buf, uint16_t Len);
+uint8_t CDC_Transmit(const void* Buf, uint32_t Len);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
-uint8_t CDC_TransmitString_FS(const char *string);
 uint8_t CDC_IsBusy();
-uint32_t CDC_RXQueue_Dequeue(uint8_t* Dst, uint32_t MaxLen);
+uint32_t CDC_RXQueue_Dequeue(void* Dst, uint32_t MaxLen);
 uint32_t CDC_TXQueue_GetReadAvailable();
 uint32_t CDC_TXQueue_GetWriteAvailable();
 uint32_t CDC_RXQueue_GetReadAvailable();
@@ -129,6 +142,21 @@ uint8_t CDC_DataReceivedHandler(const uint8_t *Data, uint32_t len);
 uint32_t CDC_GetLastTransmitStartTick();
 uint32_t CDC_GetLastTransmitCompleteTick();
 uint8_t CDC_IsComportOpen();
+
+/**
+ * @brief  CDC_TransmitString
+ *         Data to send over USB IN endpoint are sent over CDC interface
+ *         through this function.
+ *
+ *
+ * @param  string: 0-terminated C-string to send
+ * @retval USBD_OK if all operations are OK else USBD_FAIL or USBD_BUSY
+ */
+inline uint8_t CDC_TransmitString(const char *string)
+{
+    return CDC_Transmit(string, strlen(string));
+}
+
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**

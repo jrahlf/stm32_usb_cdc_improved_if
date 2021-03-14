@@ -110,7 +110,13 @@ static uint32_t s_lastTransmitComplete = 0;
 static uint32_t s_rxDropCounterHead = 0;
 static uint32_t s_rxDropCounterTail = 0;
 static uint32_t s_txDropCounter = 0;
-static uint8_t ReceiveBuffer[64];    // TODO 512 for HS
+
+#ifdef USE_USB_FS
+    static uint8_t ReceiveBuffer[CDC_DATA_FS_MAX_PACKET_SIZE];
+#else
+    static uint8_t ReceiveBuffer[CDC_DATA_HS_MAX_PACKET_SIZE];
+#endif
+
 
 static USBD_CDC_LineCodingTypeDef s_linecoding = {
     115200,       /* baud rate*/
@@ -129,7 +135,15 @@ static USBD_CDC_LineCodingTypeDef s_linecoding = {
  * @{
  */
 
-extern USBD_HandleTypeDef hUsbDeviceFS;
+#ifdef USE_USB_FS
+    extern USBD_HandleTypeDef hUsbDeviceFS;
+    #define hUsbDevice hUsbDeviceFS
+    #define CDC_DATA_MAX_PACKET_SIZE CDC_DATA_FS_MAX_PACKET_SIZE
+#else
+    extern USBD_HandleTypeDef hUsbDeviceHS;
+    #define hUsbDevice hUsbDeviceHS
+    #define CDC_DATA_MAX_PACKET_SIZE CDC_DATA_HS_MAX_PACKET_SIZE
+#endif
 
 /* USER CODE BEGIN EXPORTED_VARIABLES */
 
@@ -144,11 +158,11 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
  * @{
  */
 
-static int8_t CDC_Init_FS(void);
-static int8_t CDC_DeInit_FS(void);
-static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length);
-static int8_t CDC_Receive_FS(uint8_t *pbuf, uint32_t *Len);
-static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
+static int8_t CDC_Init(void);
+static int8_t CDC_DeInit(void);
+static int8_t CDC_Control(uint8_t cmd, uint8_t *pbuf, uint16_t length);
+static int8_t CDC_Receive(uint8_t *pbuf, uint32_t *Len);
+static int8_t CDC_TransmitCplt(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
 static uint8_t CDC_RXQueue_Enqueue(const uint8_t *buffer, uint32_t length);
@@ -161,25 +175,35 @@ static void CDC_ResumeTransmit(void);
  * @}
  */
 
+#ifdef USE_USB_FS
 USBD_CDC_ItfTypeDef USBD_Interface_fops_FS = {
-    CDC_Init_FS,
-    CDC_DeInit_FS,
-    CDC_Control_FS,
-    CDC_Receive_FS,
-    CDC_TransmitCplt_FS
+    CDC_Init,
+    CDC_DeInit,
+    CDC_Control,
+    CDC_Receive,
+    CDC_TransmitCplt
 };
+#else
+USBD_CDC_ItfTypeDef USBD_Interface_fops_HS = {
+    CDC_Init,
+    CDC_DeInit,
+    CDC_Control,
+    CDC_Receive,
+    CDC_TransmitCplt
+};
+#endif
 
 /* Private functions ---------------------------------------------------------*/
 /**
  * @brief  Initializes the CDC media low layer over the FS USB IP
  * @retval USBD_OK if all operations are OK else USBD_FAIL
  */
-static int8_t CDC_Init_FS(void)
+static int8_t CDC_Init(void)
 {
     /* USER CODE BEGIN 3 */
     /* Set Application Buffers */
-    USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
-    USBD_CDC_SetRxBuffer(&hUsbDeviceFS, ReceiveBuffer);
+    USBD_CDC_SetTxBuffer(&hUsbDevice, UserTxBufferFS, 0);
+    USBD_CDC_SetRxBuffer(&hUsbDevice, ReceiveBuffer);
     return (USBD_OK);
     /* USER CODE END 3 */
 }
@@ -188,7 +212,7 @@ static int8_t CDC_Init_FS(void)
  * @brief  DeInitializes the CDC media low layer
  * @retval USBD_OK if all operations are OK else USBD_FAIL
  */
-static int8_t CDC_DeInit_FS(void)
+static int8_t CDC_DeInit(void)
 {
     /* USER CODE BEGIN 4 */
     return (USBD_OK);
@@ -202,8 +226,10 @@ static int8_t CDC_DeInit_FS(void)
  * @param  length: Number of data to be sent (in bytes)
  * @retval Result of the operation: USBD_OK if all operations are OK else USBD_FAIL
  */
-static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length)
+static int8_t CDC_Control(uint8_t cmd, uint8_t *pbuf, uint16_t length)
 {
+    UNUSED(length);
+
     /* USER CODE BEGIN 5 */
     switch (cmd) {
     case CDC_SEND_ENCAPSULATED_COMMAND:
@@ -291,7 +317,7 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length)
  * @param  Len: Number of data received (in bytes)
  * @retval Result of the operation: USBD_OK if all operations are OK else USBD_FAIL
  */
-static int8_t CDC_Receive_FS(uint8_t *Buf, uint32_t *Len)
+static int8_t CDC_Receive(uint8_t *Buf, uint32_t *Len)
 {
     /* USER CODE BEGIN 6 */
     uint8_t dataHandled = CDC_DataReceivedHandler(Buf, *Len);
@@ -304,14 +330,13 @@ static int8_t CDC_Receive_FS(uint8_t *Buf, uint32_t *Len)
         }
     }
 
-    USBD_CDC_SetRxBuffer(&hUsbDeviceFS, ReceiveBuffer);
-    USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+    USBD_CDC_ReceivePacket(&hUsbDevice);
     return (USBD_OK);
     /* USER CODE END 6 */
 }
 
 /**
- * @brief  CDC_Transmit_FS
+ * @brief  CDC_Transmit
  *         Data to send over USB IN endpoint are sent over CDC interface
  *         through this function.
  *         @note must not be called from interrupt context which can interrupt USB interrupt
@@ -321,13 +346,13 @@ static int8_t CDC_Receive_FS(uint8_t *Buf, uint32_t *Len)
  * @param  Len: Number of data to be sent (in bytes)
  * @retval USBD_OK if all operations are OK else USBD_FAIL or USBD_BUSY
  */
-uint8_t CDC_Transmit_FS(const uint8_t *Buf, uint16_t Len)
+uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
 {
     uint8_t result = USBD_OK;
     /* USER CODE BEGIN 7 */
 
     s_lastTransmitStart = HAL_GetTick();
-    result = CDC_TXQueue_Enqueue(Buf, Len);
+    result = CDC_TXQueue_Enqueue((const uint8_t*)Buf, Len);
     if (result != USBD_OK) {
         s_txDropCounter++;
     }
@@ -349,7 +374,7 @@ uint8_t CDC_Transmit_FS(const uint8_t *Buf, uint16_t Len)
  * @param  Len: Number of data received (in bytes)
  * @retval Result of the operation: USBD_OK if all operations are OK else USBD_FAIL
  */
-static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
+static int8_t CDC_TransmitCplt(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
 {
     uint8_t result = USBD_OK;
     /* USER CODE BEGIN 13 */
@@ -384,8 +409,8 @@ void CDC_ResumeTransmit(void)
     uint32_t queueLength;
     const uint8_t *queueData = CDC_TXQueue_Dequeue(&queueLength);
     if (queueLength > 0) {
-        USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t*) queueData, queueLength);
-        USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+        USBD_CDC_SetTxBuffer(&hUsbDevice, (uint8_t*) queueData, queueLength);
+        USBD_CDC_TransmitPacket(&hUsbDevice);
     }
 }
 
@@ -550,7 +575,7 @@ const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length)
     // the next USB transfer slot is wasted with a ZLP, so instead send 1 byte in next slot
     // or possibly even more, if new data got enqueued
     // this increases throughput at the cost of latency
-    if (dequeueLength % 64 == 0) {
+    if (dequeueLength % CDC_DATA_MAX_PACKET_SIZE == 0) {
         dequeueLength--;
     }
 
@@ -569,7 +594,7 @@ const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length)
  * @param  MaxLen: Maximum number of bytes to read
  * @retval Number of bytes dequeued. The value is 0 if no bytes are available
  */
-uint32_t CDC_RXQueue_Dequeue(uint8_t *Dst, uint32_t MaxLen)
+uint32_t CDC_RXQueue_Dequeue(void *Dst, uint32_t MaxLen)
 {
     uint32_t queueSize = CDC_RXQueue_GetReadAvailable();
     if (queueSize == 0 || MaxLen == 0 || Dst == NULL) {
@@ -590,7 +615,8 @@ uint32_t CDC_RXQueue_Dequeue(uint8_t *Dst, uint32_t MaxLen)
 
     // second part after wrap around
     dequeueData = UserRxBufferFS;
-    memcpy(Dst + firstLength, dequeueData, secondLength);
+    char * dstPtr = ((char*)Dst) + firstLength;
+    memcpy(dstPtr, dequeueData, secondLength);
     tail += secondLength;
 
     atomic_signal_fence(memory_order_acquire);
@@ -609,7 +635,7 @@ uint32_t CDC_RXQueue_Dequeue(uint8_t *Dst, uint32_t MaxLen)
  */
 uint8_t CDC_IsBusy()
 {
-    USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*) hUsbDeviceFS.pClassData;
+    USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*) hUsbDevice.pClassData;
     return hcdc->TxState != 0;
 }
 
@@ -662,20 +688,6 @@ void CDC_ResetDroppedRxPackets()
 }
 
 /**
- * @brief  CDC_TransmitString_FS
- *         Data to send over USB IN endpoint are sent over CDC interface
- *         through this function.
- *
- *
- * @param  string: 0-terminated C-string to send
- * @retval USBD_OK if all operations are OK else USBD_FAIL or USBD_BUSY
- */
-uint8_t CDC_TransmitString_FS(const char *string)
-{
-    return CDC_Transmit_FS((const uint8_t*) string, strlen(string));
-}
-
-/**
  * @brief  CDC_GetLastTransmitStartTick
  *         Get the timestamp of when the last packet's _attempted_ transmission
  *         was started
@@ -705,7 +717,7 @@ uint32_t CDC_GetLastTransmitCompleteTick()
  * @brief  CDC_IsComportOpen
  *         Check if the connectd computer is reading data through the virtual com port
  *
- *         @note This functions relies on the start and comlete timestamp on the last sent packet,
+ *         @note This functions relies on the start and complete timestamp of the last sent packet,
  *         thus it is only reliable if at least 1 packet has been sent and also the information
  *         is as recent as the last sent packet (or attempted to send packet)
  *         This also means you cannot wait for CDC_IsComportOpen to return true and then start
