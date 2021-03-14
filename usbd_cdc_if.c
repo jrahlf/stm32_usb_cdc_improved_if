@@ -17,11 +17,13 @@
  *
  ******************************************************************************
  */
+
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
 #include "usbd_cdc_if.h"
 #include <stdatomic.h>
+#include <signal.h>
 
 /* USER CODE BEGIN INCLUDE */
 
@@ -109,7 +111,8 @@ static uint32_t s_lastTransmitStart = 0;
 static uint32_t s_lastTransmitComplete = 0;
 static uint32_t s_rxDropCounterHead = 0;
 static uint32_t s_rxDropCounterTail = 0;
-static uint32_t s_txDropCounter = 0;
+static uint32_t s_txDropCounterHead = 0;
+static uint32_t s_txDropCounterTail = 0;
 
 #ifdef USE_USB_FS
     static uint8_t ReceiveBuffer[CDC_DATA_FS_MAX_PACKET_SIZE];
@@ -339,7 +342,8 @@ static int8_t CDC_Receive(uint8_t *Buf, uint32_t *Len)
  * @brief  CDC_Transmit
  *         Data to send over USB IN endpoint are sent over CDC interface
  *         through this function.
- *         @note must not be called from interrupt context which can interrupt USB interrupt
+ *         @note this is not reentrant safe, i.e. do not call this from both normal and interrupt context
+ *
  *
  *
  * @param  Buf: Buffer of data to be sent
@@ -353,9 +357,11 @@ uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
 
     s_lastTransmitStart = HAL_GetTick();
     result = CDC_TXQueue_Enqueue((const uint8_t*)Buf, Len);
+
     if (result != USBD_OK) {
-        s_txDropCounter++;
+        s_txDropCounterHead++;
     }
+
     CDC_ResumeTransmit();
 
     /* USER CODE END 7 */
@@ -379,7 +385,6 @@ static int8_t CDC_TransmitCplt(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
     uint8_t result = USBD_OK;
     /* USER CODE BEGIN 13 */
     UNUSED(Buf);
-    UNUSED(Len);
     UNUSED(epnum);
 
     atomic_signal_fence(memory_order_acquire);
@@ -546,10 +551,8 @@ uint8_t CDC_RXQueue_Enqueue(const uint8_t *buffer, uint32_t length)
  *
  *         @note
  *         This is intended to be called from the transmission complete interrupt
- *         The caller must not be interrupted by interrupts which use CDC_transmit functions
- *         as the dequeued data is just a pointer to memory which can now be overriden again
- *         Also the caller must increase s_txtail after the transmission is complete, usually in the next
- *         transmission complete interrupt
+ *         The next transmission complete interrupt _must_ increase s_txtail accordingly to actually free up the
+ *         dequeued data space
  *
  * @param  length: pointer where the length of dequeued data is written to (must not be null)
  * @retval buffer to dequeud data
@@ -588,6 +591,7 @@ const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length)
 /**
  * @brief  CDC_RXQueue_Dequeue
  *         Dequeue all data from the reception queue, but at most MaxLen bytes
+ *         @note this is not reentrant safe, i.e. do not call this from both normal and interrupt context
  *
  *
  * @param  Dst: Destination buffer
@@ -597,7 +601,7 @@ const uint8_t* CDC_TXQueue_Dequeue(uint32_t *length)
 uint32_t CDC_RXQueue_Dequeue(void *Dst, uint32_t MaxLen)
 {
     uint32_t queueSize = CDC_RXQueue_GetReadAvailable();
-    if (queueSize == 0 || MaxLen == 0 || Dst == NULL) {
+    if (queueSize == 0 || MaxLen == 0) {
         return 0;
     }
 
@@ -648,7 +652,8 @@ uint8_t CDC_IsBusy()
  */
 uint32_t CDC_GetDroppedTxPackets()
 {
-    return s_txDropCounter;
+    atomic_signal_fence(memory_order_acquire);
+    return s_txDropCounterHead - s_txDropCounterTail;
 }
 
 /**
@@ -671,7 +676,9 @@ uint32_t CDC_GetDroppedRxPackets()
  */
 void CDC_ResetDroppedTxPackets()
 {
-    s_txDropCounter = 0;
+    atomic_signal_fence(memory_order_acquire);
+    s_txDropCounterTail = s_txDropCounterHead;
+    atomic_signal_fence(memory_order_release);
 }
 
 /**
@@ -683,7 +690,7 @@ void CDC_ResetDroppedTxPackets()
 void CDC_ResetDroppedRxPackets()
 {
     atomic_signal_fence(memory_order_acquire);
-    s_rxDropCounterTail = s_rxDropCounterTail;
+    s_rxDropCounterTail = s_rxDropCounterHead;
     atomic_signal_fence(memory_order_release);
 }
 

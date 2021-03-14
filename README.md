@@ -14,12 +14,11 @@
 - replace `USB_DEVICE/App/usbd_cdc_if.c` and `USB_DEVICE/App/usbd_cdc_if.h` with the ones provided in the repository
   - adjust  `APP_RX_DATA_SIZE` and `APP_TX_DATA_SIZE` if needed
 - Send data via `CDC_Transmit(const void* Buf, uint32_t Len)` or `CDC_TransmitString(const char *string)`
+  -`CDC_Transmit` is not reentrant safe / "interrupt safe"
 - Receive data by polling `uint32_t CDC_RXQueue_Dequeue(void* Dst, uint32_t MaxLen)` or by overriding `uint8_t CDC_DataReceivedHandler(const uint8_t *Data, uint32_t len)` and handling data immediately upon reception
-- do not call Transmit from interrupt context with higher priority than USB (WIP)
 
 
 ### TODO
-- transmitting data from interrupt currently not allowed
 - check if the physical limit of 4096 bytes for the USB packet area really applies to all devices
 
 ### Tested on
