@@ -369,6 +369,47 @@ uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
 }
 
 /**
+ * @brief  CDC_TransmitTimed
+ *         Data to send over USB IN endpoint are sent over CDC interface
+ *         through this function.
+ *         Unlike CDC_Transmit this function can also send data with lengths greater than APP_TX_DATA_SIZE
+ *         @note this is not reentrant safe, i.e. do not call this from both normal and interrupt context
+ *         @note due to the nature of the timeout, it is possible that only the first part of the data is enqueued/sent
+ *
+ *
+ *
+ * @param  Buf: Buffer of data to be sent
+ * @param  Len: Number of data to be sent (in bytes)
+ * @param  TimeoutMs: maximum time to wait in ms to enqueue the data
+ * @retval USBD_OK if all operations are OK else USBD_FAIL or USBD_BUSY
+ */
+uint8_t CDC_TransmitTimed(const void* Buf, uint32_t Len, uint32_t TimeoutMs)
+{
+    if (TimeoutMs == 0) {
+        return CDC_Transmit(Buf, Len);
+    }
+
+    uint32_t start = HAL_GetTick();
+    uint8_t result = USBD_OK;
+    while (Len > 0) {
+        if (HAL_GetTick() - start > TimeoutMs) {
+            result = USBD_BUSY;
+            break;
+        }
+
+        uint32_t enqueueSize = MIN(Len, APP_TX_DATA_SIZE);
+        result = CDC_Transmit(Buf, enqueueSize);
+        if (result == USBD_OK) {
+            Len -= enqueueSize;
+            Buf += Len;
+        }
+
+    }
+
+    return result;
+}
+
+/**
  * @brief  CDC_TransmitCplt_FS
  *         Data transmited callback
  *
@@ -725,8 +766,7 @@ uint32_t CDC_GetLastTransmitCompleteTick()
  *         Check if the connectd computer is reading data through the virtual com port
  *
  *         @note This functions relies on the start and complete timestamp of the last sent packet,
- *         thus it is only reliable if at least 1 packet has been sent and also the information
- *         is as recent as the last sent packet (or attempted to send packet)
+ *         its information is as recent as the last sent packet (or attempted to send packet)
  *         This also means you cannot wait for CDC_IsComportOpen to return true and then start
  *         sending data.
  *
@@ -736,7 +776,7 @@ uint32_t CDC_GetLastTransmitCompleteTick()
 uint8_t CDC_IsComportOpen()
 {
     atomic_signal_fence(memory_order_acquire);
-    return s_lastTransmitStart - s_lastTransmitComplete < 500;
+    return s_lastTransmitStart != 0 && s_lastTransmitStart - s_lastTransmitComplete < 500;
 }
 
 /**

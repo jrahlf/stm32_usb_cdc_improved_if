@@ -63,6 +63,14 @@
 #define USE_USB_FS 1
 #endif
 
+// define USB_FS_HS_PERIPHERAL if your device has a 'HS' peripheral but runs in FS mode
+//#define USB_FS_HS_PERIPHERAL
+#ifdef USB_FS_HS_PERIPHERAL
+#undef USE_USB_FS
+#undef CDC_DATA_HS_MAX_PACKET_SIZE
+#define CDC_DATA_HS_MAX_PACKET_SIZE CDC_DATA_FS_MAX_PACKET_SIZE
+#endif
+
 /* USER CODE END EXPORTED_DEFINES */
 
 /**
@@ -126,6 +134,7 @@
   */
 
 uint8_t CDC_Transmit(const void* Buf, uint32_t Len);
+uint8_t CDC_TransmitTimed(const void* Buf, uint32_t Len, uint32_t TimeoutMs);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
 uint8_t CDC_IsBusy();
@@ -152,7 +161,7 @@ uint8_t CDC_IsComportOpen();
  * @param  string: 0-terminated C-string to send
  * @retval USBD_OK if all operations are OK else USBD_FAIL or USBD_BUSY
  */
-inline uint8_t CDC_TransmitString(const char *string)
+static inline uint8_t CDC_TransmitString(const char *string)
 {
     return CDC_Transmit(string, strlen(string));
 }
