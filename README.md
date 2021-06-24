@@ -28,6 +28,7 @@
 ### API
 ```c
 uint8_t CDC_Transmit(const void* Buf, uint32_t Len);
+uint8_t CDC_TransmitTimed(const void* Buf, uint32_t Len, uint32_t TimeoutMs);
 uint8_t CDC_TransmitString(const char *string);
 uint8_t CDC_IsBusy();
 uint32_t CDC_RXQueue_Dequeue(void* Dst, uint32_t MaxLen);
