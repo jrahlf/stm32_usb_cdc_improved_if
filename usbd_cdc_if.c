@@ -342,7 +342,7 @@ static int8_t CDC_Receive(uint8_t *Buf, uint32_t *Len)
  * @brief  CDC_Transmit
  *         Data to send over USB IN endpoint are sent over CDC interface
  *         through this function.
- *         @note this is not reentrant safe, i.e. do not call this from both normal and interrupt context
+ *         @note see respective header for interrupt safety and reentrancy explanation
  *
  *
  *
@@ -352,6 +352,7 @@ static int8_t CDC_Receive(uint8_t *Buf, uint32_t *Len)
  */
 uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
 {
+	CDC_ENTER_CRITICAL_SECTION();
     uint8_t result = USBD_OK;
     /* USER CODE BEGIN 7 */
 
@@ -363,7 +364,7 @@ uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
     }
 
     CDC_ResumeTransmit();
-
+    CDC_EXIT_CRITICAL_SECTION();
     /* USER CODE END 7 */
     return result;
 }
@@ -808,3 +809,4 @@ __weak uint8_t CDC_DataReceivedHandler(const uint8_t *Buf, uint32_t len)
  */
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
+

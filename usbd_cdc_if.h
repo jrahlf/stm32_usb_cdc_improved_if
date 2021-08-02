@@ -71,6 +71,23 @@
 #define CDC_DATA_HS_MAX_PACKET_SIZE CDC_DATA_FS_MAX_PACKET_SIZE
 #endif
 
+// define CDC_REENTRANT if you use CDC_Transmit_xx in a reentrant way, i.e. from
+// nested interrupts or from both main context and interrupt context
+// if defined, interrupts will be disabled while copying data into internal buffer (critical section)
+//#define CDC_REENTRANT
+#ifdef CDC_REENTRANT
+    #define CDC_ENTER_CRITICAL_SECTION()   \
+       uint32_t PriMsk;                    \
+       PriMsk = __get_PRIMASK();           \
+       __set_PRIMASK(1);
+
+    #define CDC_EXIT_CRITICAL_SECTION()    \
+       __set_PRIMASK(PriMsk);
+#else
+    #define CDC_ENTER_CRITICAL_SECTION()
+    #define CDC_EXIT_CRITICAL_SECTION()
+#endif
+
 /* USER CODE END EXPORTED_DEFINES */
 
 /**
@@ -187,3 +204,4 @@ static inline uint8_t CDC_TransmitString(const char *string)
 #endif /* __USBD_CDC_IF_H__ */
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
+
