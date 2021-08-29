@@ -20,7 +20,7 @@
 ### Configuration
 There are several configuration options in the header:
 - If you want to use `CDC_Transmit` from both main context and interrupt context (or generally in a reentrant way), #define `CDC_REENTRANT`
-  - Beware that reentrancy is ensured by using critical sections (disabling interrupts), which means interrupts one should be careful when using reentrancy in combination with `CDC_TransmitTimed` as interrupts can get disabled up to the provided timeout
+  - Beware that reentrancy is ensured by using critical sections (disabling interrupts), which means one should be careful when using reentrancy in combination with `CDC_TransmitTimed` as interrupts can get disabled up to the provided timeout
 - Transmit and receive buffer size can be configured via `APP_TX_DATA_SIZE` and `APP_RX_DATA_SIZE`
   - If you send large bursts of data, increase transmit buffer accordingly. Otherwise, use the `CDC_TransmitTimed` function.
   - Likewise `APP_TX_DATA_SIZE` can be reduced to save RAM.
