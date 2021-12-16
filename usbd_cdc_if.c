@@ -352,7 +352,7 @@ static int8_t CDC_Receive(uint8_t *Buf, uint32_t *Len)
  */
 uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
 {
-	CDC_ENTER_CRITICAL_SECTION();
+    CDC_ENTER_CRITICAL_SECTION();
     uint8_t result = USBD_OK;
     /* USER CODE BEGIN 7 */
 
@@ -364,6 +364,7 @@ uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
     }
 
     CDC_ResumeTransmit();
+
     CDC_EXIT_CRITICAL_SECTION();
     /* USER CODE END 7 */
     return result;
@@ -374,7 +375,8 @@ uint8_t CDC_Transmit(const void *Buf, uint32_t Len)
  *         Data to send over USB IN endpoint are sent over CDC interface
  *         through this function.
  *         Unlike CDC_Transmit this function can also send data with lengths greater than APP_TX_DATA_SIZE
- *         @note this is not reentrant safe, i.e. do not call this from both normal and interrupt context
+ *         @note see respective header for interrupt safety and reentrancy explanation
+ *         @note if reentrency is enabled, interrupts are disabled for up to the provided timeout!
  *         @note due to the nature of the timeout, it is possible that only the first part of the data is enqueued/sent
  *
  *
@@ -389,6 +391,8 @@ uint8_t CDC_TransmitTimed(const void* Buf, uint32_t Len, uint32_t TimeoutMs)
     if (TimeoutMs == 0) {
         return CDC_Transmit(Buf, Len);
     }
+
+    CDC_ENTER_CRITICAL_SECTION();
 
     uint32_t start = HAL_GetTick();
     uint8_t result = USBD_OK;
@@ -406,6 +410,8 @@ uint8_t CDC_TransmitTimed(const void* Buf, uint32_t Len, uint32_t TimeoutMs)
         }
 
     }
+
+    CDC_EXIT_CRITICAL_SECTION();
 
     return result;
 }
@@ -650,7 +656,7 @@ uint32_t CDC_RXQueue_Dequeue(void *Dst, uint32_t MaxLen)
     atomic_signal_fence(memory_order_acquire);
     uint32_t tail = s_rxtail;
     uint32_t dequeueLength = MIN(queueSize, MaxLen);
-    uint32_t sizeTillWrapAround = APP_TX_DATA_SIZE - (tail % APP_RX_DATA_SIZE);
+    uint32_t sizeTillWrapAround = APP_RX_DATA_SIZE - (tail % APP_RX_DATA_SIZE);
     uint32_t firstLength = MIN(dequeueLength, sizeTillWrapAround);
     uint32_t secondLength = dequeueLength - firstLength;
 
