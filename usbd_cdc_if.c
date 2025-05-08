@@ -406,7 +406,7 @@ uint8_t CDC_TransmitTimed(const void* Buf, uint32_t Len, uint32_t TimeoutMs)
         result = CDC_Transmit(Buf, enqueueSize);
         if (result == USBD_OK) {
             Len -= enqueueSize;
-            Buf += Len;
+            Buf += enqueueSize;
         }
 
     }
